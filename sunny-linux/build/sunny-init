@@ -1,0 +1,104 @@
+#!/bin/sh
+# /sbin/sunny-init — init ของ Ubuntu บน Redmi Note 10 (sunny), kernel 4.14
+# รันได้ทั้งโหมด chroot (จาก initramfs) และเป็น PID1 หลัง switch_root
+#   - mount pseudo-fs + cgroup v1
+#   - ป้อน watchdog
+#   - ตั้ง IP บน rndis0 เท่านั้น
+#   - เปิด "ช่องทางกู้" ก่อน: busybox telnetd :23 + shell บน ttyGS0
+#   - เปิด sshd :22 และ getty บน tty0
+#   - log ทุกอย่างลง /var/log/sunny-init.log
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH HOME=/root TERM=linux LANG=C.UTF-8
+
+# ---- log ลงไฟล์ (อ่านได้ทีหลังด้วยการ mount image ใน WSL) ----
+mkdir -p /var/log 2>/dev/null
+exec >>/var/log/sunny-init.log 2>&1
+echo "===== sunny-init $(date -u +%Y-%m-%dT%H:%M:%SZ) ====="
+
+log() {
+    printf 'sunny-init: %s\n' "$*"
+    printf 'sunny-init: %s\n' "$*" > /dev/kmsg 2>/dev/null
+    [ -w /dev/tty0 ] && printf 'sunny-init: %s\n' "$*" > /dev/tty0 2>/dev/null
+    [ -w /dev/ttyGS0 ] && printf 'sunny-init: %s\n' "$*" > /dev/ttyGS0 2>/dev/null
+    return 0
+}
+
+mnt() { grep -q " $2 " /proc/mounts 2>/dev/null || mount -t "$1" "$1" "$2" 2>/dev/null; }
+
+mnt proc /proc
+mnt sysfs /sys
+mnt devtmpfs /dev
+mkdir -p /dev/pts /dev/shm /run /run/lock /var/run /tmp
+mnt devpts /dev/pts
+mount -t tmpfs tmpfs /dev/shm 2>/dev/null
+mount -t tmpfs tmpfs /run 2>/dev/null
+chmod 1777 /tmp /dev/shm 2>/dev/null
+echo sunny > /proc/sys/kernel/hostname 2>/dev/null
+log "mounts ok (pid1=$([ $$ = 1 ] && echo yes || echo no))"
+
+# ---- cgroup v1 ----
+if [ -d /sys/fs/cgroup ]; then
+    grep -q ' /sys/fs/cgroup ' /proc/mounts || mount -t tmpfs cgroup /sys/fs/cgroup 2>/dev/null
+    for c in cpu cpuacct cpuset memory devices freezer blkio net_cls pids; do
+        mkdir -p "/sys/fs/cgroup/$c" 2>/dev/null
+        grep -q " /sys/fs/cgroup/$c " /proc/mounts || \
+            mount -t cgroup -o "$c" "$c" "/sys/fs/cgroup/$c" 2>/dev/null
+    done
+    log "cgroup v1 ok"
+fi
+
+# ---- watchdog ----
+for w in /dev/watchdog /dev/watchdog0; do
+    if [ -e "$w" ]; then
+        ( while :; do printf '1' > "$w" 2>/dev/null; sleep 5; done ) &
+        log "watchdog: ป้อน $w"
+        break
+    fi
+done
+
+# ---- network: rndis0 เท่านั้น ----
+IF=
+for n in rndis0 usb0; do [ -d "/sys/class/net/$n" ] && IF="$n" && break; done
+if [ -n "$IF" ]; then
+    ip link set dev "$IF" up 2>/dev/null
+    ip addr flush dev "$IF" 2>/dev/null
+    ip addr add 192.168.42.2/24 dev "$IF" 2>/dev/null
+    ip route flush all 2>/dev/null
+    ip route add 192.168.42.0/24 dev "$IF" scope link src 192.168.42.2 2>/dev/null
+    log "net: $IF = 192.168.42.2/24"
+else
+    log "net: ไม่เจอ rndis0/usb0"
+fi
+
+# ---- หมายเหตุ: telnet :23 และ serial shell บน ttyGS0 เป็นหน้าที่ของ initramfs ----
+# (ถ้า sunny-init ไปเปิดซ้ำ จะชนพอร์ตกับ initramfs)
+
+# ---- ssh ----
+mkdir -p /run/sshd; chmod 0755 /run/sshd
+mkdir -p /run/sshd; chmod 0755 /run/sshd
+[ -f /etc/ssh/ssh_host_ed25519_key ] || ssh-keygen -A >/dev/null 2>&1
+if [ -s /run/sshd.pid ] && kill -0 "$(cat /run/sshd.pid)" 2>/dev/null; then
+    log "sshd: ทำงานอยู่แล้ว"
+else
+    /usr/sbin/sshd -o PidFile=/run/sshd.pid
+    if [ -s /run/sshd.pid ]; then log "sshd: เปิดแล้ว port 22"; else log "sshd: เปิดไม่สำเร็จ (ดู error ด้านบน)"; fi
+fi
+
+# ---- getty บนจอ (ต้องมี fbcon) ----
+if [ -c /dev/tty0 ]; then
+    ( setsid /sbin/agetty --autologin dev --noclear tty0 linux ) >/dev/null 2>&1 &
+    log "getty: tty0 (จอ) autologin dev"
+fi
+
+log "พร้อม: ssh dev@192.168.42.2 / telnet 192.168.42.2"
+
+# ---- ถ้าเป็น PID1: คุมไม่ให้ตาย และ restart sshd ----
+while :; do
+    sleep 20
+    if [ -s /run/sshd.pid ] && kill -0 "$(cat /run/sshd.pid)" 2>/dev/null; then
+        :
+    else
+        /usr/sbin/sshd -o PidFile=/run/sshd.pid
+        log "sshd: restart"
+    fi
+done

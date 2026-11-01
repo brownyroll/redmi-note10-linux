@@ -1,0 +1,12 @@
+﻿=== verify @ 20261030_001118 ===
+adb=C:\Users\brown\Desktop\Google\Android\platform-tools\adb.exe
+fastboot=C:\Users\brown\Desktop\Google\Android\platform-tools\fastboot.exe
+
+=== mode ===
+  fastboot: (ว่าง)
+  adb     : (ว่าง)
+  => none
+
+[!] ไม่พบเครื่องทั้งสองโหมด
+    - ถ้าเครื่องอยู่หน้า FASTBOOT แต่ adb ไม่เห็น = ปกติ (adb ใช้ไม่ได้ใน fastboot)
+    - เสียบสาย USB ที่เป็น data, ปลดล็อกจอ, กด Allow ใน popup RSA

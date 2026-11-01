@@ -1,0 +1,13 @@
+﻿=== verify @ 20261030_005756 ===
+adb=C:\Users\brown\Desktop\Google\Android\platform-tools\adb.exe
+fastboot=C:\Users\brown\Desktop\Google\Android\platform-tools\fastboot.exe
+
+=== mode ===
+  fastboot: (ว่าง)
+  adb     : 579a9d18	unauthorized
+  => unauthorized
+
+[!] เห็นเครื่องแล้ว แต่ยังไม่ authorize (adb ขึ้น unauthorized)
+    - ปลดล็อกจอ แล้วกด Allow ใน popup 'อนุญาตการดีบัก USB'
+    - ถ้าไม่มี popup: ปิด/เปิด USB debugging แล้วเสียบสายใหม่
+    - หรือสั่ง: "C:\Users\brown\Desktop\Google\Android\platform-tools\adb.exe" kill-server; "C:\Users\brown\Desktop\Google\Android\platform-tools\adb.exe" start-server
