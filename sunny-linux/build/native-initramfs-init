@@ -1,0 +1,62 @@
+#!/bin/busybox sh
+/bin/busybox --install -s /bin
+export PATH=/bin:/sbin
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+chmod 0666 /dev/null /dev/zero /dev/full /dev/random /dev/urandom /dev/tty /dev/ptmx 2>/dev/null || :
+mkdir -p /dev/pts /newroot /configfs
+mount -t devpts devpts /dev/pts
+echo 'sunny: locating Ubuntu root' > /dev/kmsg
+mdev -s
+ROOT=
+for attempt in $(seq 1 30); do
+  for u in /sys/class/block/*/uevent; do
+    [ -f "$u" ] || continue
+    if grep -qx 'PARTNAME=userdata' "$u"; then
+      d=$(basename "$(dirname "$u")")
+      [ -b "/dev/$d" ] && ROOT="/dev/$d" && break
+    fi
+  done
+  [ -n "$ROOT" ] && break
+  mdev -s; sleep 1
+done
+if [ -n "$ROOT" ] && mount -t ext4 -o rw,noatime "$ROOT" /newroot && [ -x /newroot/bin/sh ] && [ -f /newroot/etc/os-release ]; then
+  mkdir -p /newroot/run /newroot/usr/local/sbin /newroot/usr/local/bin /newroot/proc /newroot/sys /newroot/dev
+  cp /sunny-native-init /newroot/usr/local/sbin/sunny-native-init && chmod 755 /newroot/usr/local/sbin/sunny-native-init
+  cp /sunnyterm /newroot/usr/local/sbin/sunnyterm && chmod 755 /newroot/usr/local/sbin/sunnyterm
+  cp /sunny-qgd /newroot/usr/local/sbin/sunny-qgd && chmod 755 /newroot/usr/local/sbin/sunny-qgd
+  cp /sunny-lan /newroot/usr/local/sbin/sunny-lan && chmod 755 /newroot/usr/local/sbin/sunny-lan
+  cp /sunny-usb-status /newroot/usr/local/sbin/sunny-usb-status && chmod 755 /newroot/usr/local/sbin/sunny-usb-status
+  cp /sunny-usb-role /newroot/usr/local/sbin/sunny-usb-role && chmod 755 /newroot/usr/local/sbin/sunny-usb-role
+  cp /sunny-power /newroot/usr/local/sbin/sunny-power && chmod 755 /newroot/usr/local/sbin/sunny-power
+  cp /sunny-list /newroot/usr/local/bin/list && chmod 755 /newroot/usr/local/bin/list
+  cp /sunny-base-tools /newroot/usr/local/sbin/sunny-base-tools && chmod 755 /newroot/usr/local/sbin/sunny-base-tools
+  cp /sunny-base-config /newroot/usr/local/sbin/sunny-base-config && chmod 755 /newroot/usr/local/sbin/sunny-base-config
+  cp /sunny-time-sync /newroot/usr/local/sbin/sunny-time-sync && chmod 755 /newroot/usr/local/sbin/sunny-time-sync
+  cp /sunny-heal /newroot/usr/local/sbin/sunny-heal && chmod 755 /newroot/usr/local/sbin/sunny-heal
+  cp /sunny-battery /newroot/usr/local/sbin/sunny-battery && chmod 755 /newroot/usr/local/sbin/sunny-battery
+  cp /sunny-cgroups /newroot/usr/local/sbin/sunny-cgroups && chmod 755 /newroot/usr/local/sbin/sunny-cgroups
+  cp /sunny-service /newroot/usr/local/sbin/sunny-service && chmod 755 /newroot/usr/local/sbin/sunny-service
+  cp /sunnyctl /newroot/usr/local/sbin/sunnyctl && chmod 755 /newroot/usr/local/sbin/sunnyctl
+  cp /sunny-systemctl /newroot/usr/local/bin/systemctl && chmod 755 /newroot/usr/local/bin/systemctl
+  cp /nano /newroot/usr/bin/nano && chmod 755 /newroot/usr/bin/nano
+  for name in shutdown reboot poweroff halt; do ln -sf sunny-power "/newroot/usr/local/sbin/$name"; done
+  [ -e /newroot/etc/sunny-lan.conf ] || cp /sunny-lan.conf /newroot/etc/sunny-lan.conf
+  mount --move /proc /newroot/proc
+  mount --move /sys /newroot/sys
+  mount --move /dev /newroot/dev
+  exec switch_root /newroot /usr/local/sbin/sunny-native-init
+fi
+echo 'sunny: root mount failed; rescue shell on serial' > /dev/kmsg
+mount -t configfs configfs /configfs
+G=/configfs/usb_gadget/g1
+mkdir -p "$G/strings/0x409" "$G/configs/c.1/strings/0x409" "$G/functions/acm.GS0"
+echo 0x1d6b > "$G/idVendor"; echo 0x0104 > "$G/idProduct"
+echo sunny-rescue > "$G/strings/0x409/serialnumber"
+echo sunny > "$G/strings/0x409/manufacturer"; echo rescue > "$G/strings/0x409/product"
+echo serial > "$G/configs/c.1/strings/0x409/configuration"
+ln -s "$G/functions/acm.GS0" "$G/configs/c.1/" 2>/dev/null
+for attempt in $(seq 1 30); do UDC=$(ls /sys/class/udc | head -1); [ -n "$UDC" ] && break; sleep 1; done
+[ -n "$UDC" ] && echo "$UDC" > "$G/UDC"
+while :; do [ -c /dev/ttyGS0 ] && setsid sh -c 'exec sh -i </dev/ttyGS0 >/dev/ttyGS0 2>&1'; sleep 2; done

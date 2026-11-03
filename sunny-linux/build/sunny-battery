@@ -1,0 +1,56 @@
+#!/bin/sh
+# Qualcomm QG monitor.  Values are always sourced from hardware sysfs; this
+# daemon never invents or voltage-estimates a percentage.
+set -u
+RUN=/run/sunny-battery
+LOG=/var/log/sunny-battery.log
+mkdir -p "$RUN" /var/log
+last=-1
+same=0
+profile_warned=0
+
+readn() { cat "$1" 2>/dev/null || echo -1; }
+snapshot() {
+  cap=$(readn /sys/class/power_supply/bms/real_capacity)
+  [ "$cap" -ge 0 ] 2>/dev/null || cap=$(readn /sys/class/power_supply/battery/capacity)
+  raw=$(readn /sys/class/power_supply/bms/capacity_raw)
+  cc=$(readn /sys/class/power_supply/bms/charge_counter)
+  full=$(readn /sys/class/power_supply/bms/charge_full)
+  uv=$(readn /sys/class/power_supply/bms/voltage_now)
+  ua=$(readn /sys/class/power_supply/bms/current_now)
+  ready=$(readn /sys/class/power_supply/bms/soc_reporting_ready)
+  type=$(cat /sys/class/power_supply/bms/battery_type 2>/dev/null || echo unavailable)
+  state=$(cat /sys/class/power_supply/battery/status 2>/dev/null || echo Unknown)
+  {
+    echo "PERCENT=$cap"
+    echo "RAW=$raw"
+    echo "CHARGE_COUNTER_UAH=$cc"
+    echo "CHARGE_FULL_UAH=$full"
+    echo "VOLTAGE_UV=$uv"
+    echo "CURRENT_UA=$ua"
+    echo "STATUS=$state"
+    echo "SOC_READY=$ready"
+    echo "PROFILE=$type"
+  } > "$RUN/status.new"
+  mv "$RUN/status.new" "$RUN/status"
+}
+
+# Do not write fg_reset here.  Resetting QG on every native boot discards the
+# gauge's learning state and cannot repair a battery-profile selection failure.
+# Profile selection is fixed in the kernel; this daemon is monitoring-only.
+sleep 12
+
+while :; do
+  snapshot
+  cap=$(readn /sys/class/power_supply/bms/real_capacity)
+  uv=$(readn /sys/class/power_supply/bms/voltage_now)
+  state=$(cat /sys/class/power_supply/battery/status 2>/dev/null || echo Unknown)
+  if [ "$cap" = "$last" ]; then same=$((same + 1)); else same=0; last=$cap; fi
+
+  profile=$(cat /sys/class/power_supply/bms/battery_type 2>/dev/null || echo unavailable)
+  if [ "$profile_warned" -eq 0 ] && { [ "$profile" = "Unknown Battery" ] || [ "$profile" = unavailable ]; }; then
+    profile_warned=1
+    echo "$(date -Iseconds 2>/dev/null) QG battery profile unavailable; leaving gauge state intact cap=$cap uv=$uv" >> "$LOG"
+  fi
+  sleep 15
+done

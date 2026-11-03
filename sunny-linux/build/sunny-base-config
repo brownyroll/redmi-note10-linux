@@ -1,0 +1,114 @@
+#!/bin/sh
+# Repair assumptions made by the live-server ISO that do not hold under the
+# custom kernel/init: no mounted CD-ROM and no systemd-resolved daemon.
+set -eu
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# resolved is not running, so its stub symlink is guaranteed to be broken.
+if [ -L /etc/resolv.conf ]; then rm -f /etc/resolv.conf; fi
+if [ ! -e /etc/resolv.conf ]; then
+  : > /etc/resolv.conf
+fi
+if ! grep -q '^nameserver ' /etc/resolv.conf 2>/dev/null; then
+  cat > /etc/resolv.conf <<'EOF'
+# Bootstrap fallback; a DHCP lease replaces this with advertised DNS servers.
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+options timeout:2 attempts:3
+EOF
+fi
+chown root:root /etc/resolv.conf
+chmod 0644 /etc/resolv.conf
+
+# Disable the installer-only CD-ROM source, retaining it as a recoverable file.
+if [ -f /etc/apt/sources.list.d/cdrom.sources ]; then
+  mv /etc/apt/sources.list.d/cdrom.sources /etc/apt/sources.list.d/cdrom.sources.disabled
+fi
+
+# arm64 packages are published by Ubuntu Ports. Generate from the actual
+# codename in this rootfs rather than hard-coding an unrelated Ubuntu release.
+codename=$(sed -n 's/^VERSION_CODENAME=//p' /etc/os-release | tr -d '"')
+arch=$(dpkg --print-architecture 2>/dev/null || uname -m)
+if [ -n "$codename" ] && { [ "$arch" = arm64 ] || [ "$arch" = aarch64 ]; }; then
+  src=/etc/apt/sources.list.d/ubuntu.sources
+  mkdir -p /var/lib/sunny/apt
+  if [ -f "$src.sunny-backup" ]; then
+    mv "$src.sunny-backup" /var/lib/sunny/apt/ubuntu.sources.backup
+  fi
+  [ -f /var/lib/sunny/apt/ubuntu.sources.backup ] || cp -p "$src" /var/lib/sunny/apt/ubuntu.sources.backup 2>/dev/null || :
+  cat > "$src" <<EOF
+Types: deb
+URIs: http://ports.ubuntu.com/ubuntu-ports/
+Suites: $codename $codename-updates $codename-backports
+Components: main universe restricted multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+Types: deb
+URIs: http://ports.ubuntu.com/ubuntu-ports/
+Suites: $codename-security
+Components: main universe restricted multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+EOF
+  chmod 0644 "$src"
+fi
+
+# Explicit root access requested for this appliance. Keep dev as an ordinary
+# sudo-capable account; never create a second UID 0 account.
+root_secret=$(awk -F: '$1=="root" {print $2}' /etc/shadow)
+case "$root_secret" in
+  ''|'!'|'!!'|'*'|!*) echo 'root:ubuntu1234' | chpasswd;;
+esac
+mkdir -p /etc/ssh/sshd_config.d
+cat > /etc/ssh/sshd_config.d/00-sunny-native.conf <<'EOF'
+PermitRootLogin yes
+PasswordAuthentication yes
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+AllowUsers root dev
+Banner /etc/issue.net
+EOF
+chmod 0600 /etc/ssh/sshd_config.d/00-sunny-native.conf
+# This rootfs has a generated sshd_config without an Include directive, so
+# apply the effective settings to the main file as well.
+sed -i \
+  -e 's/^[#[:space:]]*PermitRootLogin[[:space:]].*/PermitRootLogin yes/' \
+  -e 's/^[#[:space:]]*PasswordAuthentication[[:space:]].*/PasswordAuthentication yes/' \
+  /etc/ssh/sshd_config
+grep -q '^PermitRootLogin ' /etc/ssh/sshd_config || echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config
+grep -q '^PasswordAuthentication ' /etc/ssh/sshd_config || echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config
+grep -q '^PermitEmptyPasswords ' /etc/ssh/sshd_config || echo 'PermitEmptyPasswords no' >> /etc/ssh/sshd_config
+grep -q '^AllowUsers ' /etc/ssh/sshd_config || echo 'AllowUsers root dev' >> /etc/ssh/sshd_config
+grep -q '^Banner ' /etc/ssh/sshd_config || echo 'Banner /etc/issue.net' >> /etc/ssh/sshd_config
+cat > /etc/issue.net <<'EOF'
+Brownyrollz-PhoneSunny — Ubuntu 26.04 native userspace
+  dev  / ubuntu1234  -> root shell: sudo -i
+  root / ubuntu1234  -> direct root shell
+EOF
+chmod 0644 /etc/issue.net
+
+# Keep one post-login banner (sshd already prints /etc/motd); avoid a duplicate
+# from /etc/profile.d and correct the old autologin description.
+rm -f /etc/profile.d/99-sunny-login.sh
+cat > /etc/motd <<'EOF'
+Ubuntu 26.04 LTS — Redmi Note 10 4G (sunny)
+  SSH dev / ubuntu1234: use sudo -i for a root shell
+  SSH root / ubuntu1234: direct root shell
+  Phone display: local root console
+EOF
+chmod 0644 /etc/motd
+
+# The vendor 4.14 kernel implements xtables/iptables but not the newer nf_tables
+# generation-id API used by Ubuntu's default backend.  Keep Docker NAT and the
+# host firewall functional by selecting the compatible legacy implementation.
+if command -v update-alternatives >/dev/null 2>&1; then
+  [ ! -x /usr/sbin/iptables-legacy ] || update-alternatives --set iptables /usr/sbin/iptables-legacy
+  [ ! -x /usr/sbin/ip6tables-legacy ] || update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
+  [ ! -x /usr/sbin/arptables-legacy ] || update-alternatives --set arptables /usr/sbin/arptables-legacy
+  [ ! -x /usr/sbin/ebtables-legacy ] || update-alternatives --set ebtables /usr/sbin/ebtables-legacy
+fi
+
+# SSH and Docker are native boot services now that the kernel exposes the
+# required cgroup controllers, namespaces, overlayfs and legacy iptables NAT.
+mkdir -p /etc/sunny/services
+: > /etc/sunny/services/ssh
+: > /etc/sunny/services/docker

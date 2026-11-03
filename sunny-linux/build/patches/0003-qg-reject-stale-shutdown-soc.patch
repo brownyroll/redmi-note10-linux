@@ -1,0 +1,24 @@
+diff --git a/drivers/power/supply/qcom/qpnp-qg.c b/drivers/power/supply/qcom/qpnp-qg.c
+--- a/drivers/power/supply/qcom/qpnp-qg.c
++++ b/drivers/power/supply/qcom/qpnp-qg.c
+@@ -3761,9 +3761,17 @@ static int qg_determine_pon_soc(struct qpnp_qg *chip)
+ 			(shutdown_temp < 0 || batt_temp < 0))
+ 		goto use_pon_ocv;
+ 
+-	if ((chip->dt.shutdown_soc_threshold != -EINVAL) &&
+-			!is_between(0, chip->dt.shutdown_soc_threshold,
+-			abs(pon_soc - shutdown[SDAM_SOC])))
++	/*
++	 * Some sunny DTBOs omit shutdown-soc-threshold while retaining shutdown
++	 * SOC for 24 hours.  Without Android's userspace QG daemon that stale
++	 * value can survive every Linux reboot even when profile-derived PON SOC
++	 * clearly disagrees.  Keep the DT value when supplied; otherwise reject
++	 * a shutdown value that differs from real OCV/profile SOC by over 15%.
++	 */
++	if (!is_between(0,
++			chip->dt.shutdown_soc_threshold != -EINVAL ?
++			chip->dt.shutdown_soc_threshold : 15,
++			abs(pon_soc - shutdown[SDAM_SOC])))
+ 		goto use_pon_ocv;
+ 
+ 	use_pon_ocv = false;

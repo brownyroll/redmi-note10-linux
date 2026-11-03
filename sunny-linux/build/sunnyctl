@@ -1,0 +1,27 @@
+#!/bin/sh
+set -u
+cmd=${1:-help}; sub=${2:-status}
+case "$cmd" in
+  ubuntu)
+    case "$sub" in
+      start) exec sunny-service all start;;
+      stop) exec sunny-service all stop;;
+      restart) exec sunny-service all restart;;
+      status) echo 'Ubuntu userspace: native root filesystem (PID 1 sunny-native-init)'; exec sunny-service all status;;
+      enter) exec /bin/bash -l;;
+      logs) tail -n 200 /var/log/sunny-native-boot.log /var/log/sunny-sshd.log /var/log/sunny-docker.log 2>/dev/null;;
+      *) echo 'usage: sunnyctl ubuntu {start|stop|restart|status|enter|logs}' >&2; exit 2;;
+    esac;;
+  ssh|docker) exec sunny-service "$cmd" "$sub";;
+  battery) cat /run/sunny-battery/status 2>/dev/null || exec sunny-heal battery;;
+  kernel-audit)
+    echo "kernel: $(uname -r)"
+    echo 'required Docker cgroups:'
+    for c in devices pids memory cpu cpuacct cpuset freezer blkio; do
+      awk -v c="$c" '$1==c {printf "  %-9s enabled=%s\n",c,$4; found=1} END{if(!found) printf "  %-9s MISSING\n",c}' /proc/cgroups
+    done
+    echo 'namespaces:'; ls -1 /proc/self/ns 2>/dev/null | tr '\n' ' '; echo
+    grep -q overlay /proc/filesystems && echo 'overlayfs: yes' || echo 'overlayfs: no'
+    ;;
+  *) echo 'usage: sunnyctl {ubuntu|ssh|docker|battery|kernel-audit} ...' >&2; exit 2;;
+esac

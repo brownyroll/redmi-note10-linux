@@ -1,0 +1,97 @@
+#!/bin/sh
+# Switch one USB-C port between PC gadget and OTG host without rebooting.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+SYS=${SUNNY_SYS_ROOT:-/sys}
+CFG=${SUNNY_CONFIGFS_ROOT:-/configfs}
+RUN=${SUNNY_USB_ROLE_RUN:-/run/sunny-usb-role}
+DUAL="$SYS/class/dual_role_usb/otg_default"
+G="$CFG/usb_gadget/g1"
+mkdir -p "$RUN"
+
+write_status() {
+  tmp="$RUN/status.$$"
+  mode=$(cat "$DUAL/mode" 2>/dev/null || echo unknown)
+  data=$(cat "$DUAL/data_role" 2>/dev/null || echo unknown)
+  power=$(cat "$DUAL/power_role" 2>/dev/null || echo unknown)
+  present=$(cat "$SYS/class/power_supply/usb/present" 2>/dev/null || echo unknown)
+  printf 'STATE=%s\nMODE=%s\nDATA_ROLE=%s\nPOWER_ROLE=%s\nUSB_PRESENT=%s\n' \
+    "$1" "$mode" "$data" "$power" "$present" > "$tmp"
+  mv "$tmp" "$RUN/status"
+}
+host_device_present() {
+  for d in "$SYS"/bus/usb/devices/*; do
+    [ -r "$d/devpath" ] || continue
+    [ "$(cat "$d/devpath" 2>/dev/null)" = 0 ] && continue
+    return 0
+  done
+  return 1
+}
+run_mdev() { [ "${SUNNY_SKIP_MDEV:-0}" = 1 ] || /usr/bin/busybox mdev -s; }
+unbind_gadget() {
+  [ -e "$G/UDC" ] || return 0
+  current=$(cat "$G/UDC" 2>/dev/null)
+  [ -z "$current" ] || printf '\n' > "$G/UDC" 2>/dev/null || :
+}
+bind_gadget() {
+  [ -e "$G/UDC" ] || return 0
+  current=$(cat "$G/UDC" 2>/dev/null)
+  if [ -z "$current" ]; then
+    for _ in 1 2 3 4 5; do
+      udc=$(ls "$SYS/class/udc" 2>/dev/null | head -n 1)
+      [ -z "$udc" ] || { echo "$udc" > "$G/UDC" 2>/dev/null && break; }
+      sleep 1
+    done
+  fi
+  # Rebinding the gadget recreates/resets rndis0; always restore management IP.
+  if [ "$SYS" = /sys ] && [ -d /sys/class/net/rndis0 ]; then
+    ip link set rndis0 up 2>/dev/null || :
+    ip addr replace 192.168.42.2/24 dev rndis0 2>/dev/null || :
+  fi
+}
+set_host() {
+  write_status 'Switching to OTG host'
+  unbind_gadget
+  echo dfp > "$DUAL/mode" 2>/dev/null || return 1
+  run_mdev
+  write_status 'OTG Host - waiting for hub/device'
+}
+set_device() {
+  write_status 'Switching to PC/device'
+  echo ufp > "$DUAL/mode" 2>/dev/null || return 1
+  sleep 1
+  bind_gadget
+  write_status 'PC/device connected'
+}
+
+[ -w "$DUAL/mode" ] || { write_status 'USB role control unavailable'; exit 0; }
+detached=0
+while :; do
+  mode=$(cat "$DUAL/mode" 2>/dev/null || echo unknown)
+  present=$(cat "$SYS/class/power_supply/usb/present" 2>/dev/null || echo 0)
+  if [ "$mode" = dfp ]; then
+    if host_device_present; then
+      detached=0; run_mdev; write_status 'OTG Connected'
+    elif [ "$present" = 1 ]; then
+      # A PC/charger is sourcing VBUS and no downstream host device exists.
+      set_device || write_status 'PC/device switch failed'
+      detached=0
+    else
+      write_status 'OTG Host - waiting for hub/device'
+    fi
+  elif [ "$present" = 0 ]; then
+    typec=$(cat "$SYS/class/power_supply/usb/typec_mode" 2>/dev/null || echo unknown)
+    case "$typec" in
+      *"Sink attached"*)
+        # A real OTG/hub partner advertises Rd (sink). Only that electrical CC
+        # state authorizes sourcing VBUS and changing to DFP/host.
+        detached=$((detached+1))
+        if [ "$detached" -ge 2 ]; then set_host || write_status 'OTG host switch failed'; detached=0
+        else write_status 'OTG accessory detected - confirming'; fi
+        ;;
+      *) detached=0; write_status 'USB disconnected - waiting for Type-C partner';;
+    esac
+  else
+    detached=0; bind_gadget; write_status 'PC/device connected'
+  fi
+  sleep 3
+done

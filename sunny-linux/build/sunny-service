@@ -1,0 +1,49 @@
+#!/bin/sh
+set -u
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+LOG=/var/log
+ENABLED=/etc/sunny/services
+mkdir -p /run/sshd /run/docker "$LOG" "$ENABLED"
+svc=${1:-status}; action=${2:-status}
+
+alive() { pgrep -x "$1" >/dev/null 2>&1; }
+start_ssh() { alive sshd || /usr/sbin/sshd -E "$LOG/sunny-sshd.log"; }
+stop_ssh() {
+  pkill -TERM -x sshd 2>/dev/null || :
+  n=0; while alive sshd && [ "$n" -lt 10 ]; do sleep 1; n=$((n+1)); done
+}
+start_docker() {
+  alive dockerd && return 0
+  if ! /usr/local/sbin/sunny-cgroups >>"$LOG/sunny-docker.log" 2>&1; then
+    echo 'docker blocked: see sunnyctl kernel-audit and /var/log/sunny-docker.log' >&2
+    return 2
+  fi
+  rm -f /run/docker.pid /var/run/docker.pid
+  setsid -f /usr/bin/dockerd --host=unix:///run/docker.sock --exec-root=/run/docker \
+    --data-root=/var/lib/docker >>"$LOG/sunny-docker.log" 2>&1
+}
+stop_docker() {
+  pkill -TERM -x dockerd 2>/dev/null || :
+  n=0; while alive dockerd && [ "$n" -lt 20 ]; do sleep 1; n=$((n+1)); done
+  pkill -TERM -x containerd 2>/dev/null || :
+}
+status() { if alive "$1"; then echo "$1: running"; return 0; else echo "$1: stopped"; return 3; fi; }
+enable_svc() { : > "$ENABLED/$1"; echo "$1: enabled"; }
+disable_svc() { rm -f "$ENABLED/$1"; echo "$1: disabled"; }
+enabled_svc() { [ -e "$ENABLED/$1" ]; }
+
+case "$svc:$action" in
+  ssh:start) start_ssh;; ssh:stop) stop_ssh;; ssh:restart) stop_ssh; start_ssh;; ssh:status) status sshd;;
+  docker:start) start_docker;; docker:stop) stop_docker;; docker:restart) stop_docker; start_docker;; docker:status) status dockerd;;
+  ssh:enable) enable_svc ssh;; ssh:disable) disable_svc ssh;;
+  docker:enable) enable_svc docker;; docker:disable) disable_svc docker;;
+  ssh:is-enabled) enabled_svc ssh;; docker:is-enabled) enabled_svc docker;;
+  ssh:is-active) alive sshd;; docker:is-active) alive dockerd;;
+  all:start) start_ssh; start_docker || :;; all:stop) stop_docker; stop_ssh;; all:restart) stop_docker; stop_ssh; start_ssh; start_docker || :;;
+  all:status|status:status) rc=0; status sshd || rc=$?; status dockerd || { s=$?; [ "$rc" -ne 0 ] || rc=$s; }; exit "$rc";;
+  boot:start)
+    enabled_svc ssh && start_ssh
+    enabled_svc docker && start_docker || :
+    ;;
+  *) echo 'usage: sunny-service {ssh|docker|all|boot} {start|stop|restart|status|enable|disable|is-active|is-enabled}' >&2; exit 2;;
+esac

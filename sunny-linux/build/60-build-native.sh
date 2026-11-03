@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+SUNNY=${SUNNY_ROOT:-/root/sunny}
+OUT="$SUNNY/out"
+IR="$OUT/initramfs-native"
+WIN="/mnt/c/Users/brown/Documents/Default Project/sunny-linux/out"
+S="$HERE/../src"
+bash "$HERE/fetch-nano-arm64.sh"
+aarch64-linux-gnu-gcc -Os -static -nostdlib -ffreestanding -fno-stack-protector \
+  -fno-unwind-tables -fno-asynchronous-unwind-tables -I/usr/include/libdrm \
+  -DTTY_IN='"/dev/sunny-no-serial"' -Wl,--build-id=none -o "$OUT/sunnyterm-native" "$S/sunnyterm.c"
+aarch64-linux-gnu-gcc -Os -static -s -Wall -Wextra \
+  -o "$OUT/sunny-qgd" "$HERE/sunny-qgd.c"
+mkdir -p "$IR/bin" "$IR/dev" "$IR/proc" "$IR/sys" "$IR/newroot" "$IR/configfs"
+cp "$OUT/busybox-aarch64" "$IR/bin/busybox"
+cp "$OUT/sunnyterm-native" "$IR/sunnyterm"
+cp "$OUT/sunny-qgd" "$IR/sunny-qgd"
+cp "$HERE/native-initramfs-init" "$IR/init"
+cp "$HERE/sunny-native-init" "$IR/sunny-native-init"
+cp "$HERE/sunny-lan" "$IR/sunny-lan"
+cp "$HERE/sunny-lan.conf" "$IR/sunny-lan.conf"
+cp "$HERE/sunny-usb-status" "$IR/sunny-usb-status"
+cp "$HERE/sunny-usb-role" "$IR/sunny-usb-role"
+cp "$HERE/sunny-power" "$IR/sunny-power"
+cp "$HERE/sunny-list" "$IR/sunny-list"
+cp "$HERE/sunny-base-tools" "$IR/sunny-base-tools"
+cp "$HERE/sunny-base-config" "$IR/sunny-base-config"
+cp "$HERE/sunny-time-sync" "$IR/sunny-time-sync"
+cp "$HERE/sunny-heal" "$IR/sunny-heal"
+cp "$HERE/sunny-battery" "$IR/sunny-battery"
+cp "$HERE/sunny-cgroups" "$IR/sunny-cgroups"
+cp "$HERE/sunny-service" "$IR/sunny-service"
+cp "$HERE/sunnyctl" "$IR/sunnyctl"
+cp "$HERE/sunny-systemctl" "$IR/sunny-systemctl"
+cp "$OUT/nano-pkg/bin/nano" "$IR/nano"
+chmod 755 "$IR/bin/busybox" "$IR/init" "$IR/sunny-native-init" "$IR/sunnyterm" "$IR/sunny-qgd" "$IR/sunny-lan" "$IR/sunny-usb-status" "$IR/sunny-usb-role" "$IR/sunny-power" "$IR/sunny-list" "$IR/sunny-base-tools" "$IR/sunny-base-config" "$IR/sunny-time-sync" "$IR/sunny-heal" "$IR/sunny-battery" "$IR/sunny-cgroups" "$IR/sunny-service" "$IR/sunnyctl" "$IR/sunny-systemctl" "$IR/nano"
+sh -n "$IR/init"; sh -n "$IR/sunny-native-init"; sh -n "$IR/sunny-lan"; sh -n "$IR/sunny-usb-status"; sh -n "$IR/sunny-usb-role"; sh -n "$IR/sunny-power"; sh -n "$IR/sunny-list"; sh -n "$IR/sunny-base-tools"; sh -n "$IR/sunny-base-config"; sh -n "$IR/sunny-time-sync"; sh -n "$IR/sunny-heal"; sh -n "$IR/sunny-battery"; sh -n "$IR/sunny-cgroups"; sh -n "$IR/sunny-service"; sh -n "$IR/sunnyctl"; sh -n "$IR/sunny-systemctl"
+(cd "$IR"; find . -print | cpio -o -H newc 2>/dev/null | gzip -9 > "$OUT/initramfs-native.cpio.gz")
+python3 "$SUNNY/tools/mkbootimg/mkbootimg.py" --header_version 4 --vendor_boot "$OUT/vendor_boot-native.img" --vendor_ramdisk "$OUT/initramfs-native.cpio.gz" --dtb "$OUT/dtb" --vendor_cmdline 'console=ttyGS0,115200n8 androidboot.hardware=qcom androidboot.usbcontroller=a600000.dwc3 loop.max_part=7 lpm_levels.sleep_disabled=1 service_locator.enable=1 swiotlb=1 msm_rtb.filter=0x237 kpti=off' --os_version 16.0.0 --os_patch_level 2026-05 --pagesize 4096
+cp "$OUT/vendor_boot-native.img" "$WIN/vendor_boot-native.img"
+base64 -w 76 "$OUT/sunnyterm-native" > "$WIN/sunnyterm-native.b64"
+base64 -w 76 "$HERE/sunny-heal" > "$WIN/sunny-heal.b64"
+base64 -w 76 "$HERE/sunny-base-config" > "$WIN/sunny-base-config.b64"
+base64 -w 76 "$HERE/sunny-usb-role" > "$WIN/sunny-usb-role.b64"
+sha256sum "$WIN/vendor_boot-native.img"

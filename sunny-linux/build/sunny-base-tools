@@ -1,0 +1,22 @@
+#!/bin/sh
+# Expose only missing BusyBox applets; never shadow a full userspace tool.
+set -eu
+BB=/usr/bin/busybox
+DIR=/usr/local/bin
+mkdir -p "$DIR"
+for name in ping ping6 traceroute traceroute6 ifconfig route nslookup wget unzip vi arp arping netstat; do
+  command -v "$name" >/dev/null 2>&1 || ln -sf "$BB" "$DIR/$name"
+done
+# Remove only our old compatibility wrapper; the image now ships real nano.
+if [ -f "$DIR/nano" ] && grep -q 'lightweight BusyBox vi editor' "$DIR/nano" 2>/dev/null; then
+  rm -f "$DIR/nano"
+fi
+cat > /root/.inputrc <<'EOF'
+set editing-mode emacs
+set enable-bracketed-paste off
+"\e[A": previous-history
+"\e[B": next-history
+"\e[C": forward-char
+"\e[D": backward-char
+"\e[3~": delete-char
+EOF

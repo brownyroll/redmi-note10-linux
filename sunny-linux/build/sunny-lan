@@ -1,0 +1,207 @@
+#!/bin/sh
+# Resilient wired/OTG network state machine. A late DHCP server must work
+# without unplugging the adapter, and exactly one process owns an interface.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+MODE=${MODE:-auto}
+STATIC_ADDRESS=${STATIC_ADDRESS:-192.168.50.1/24}
+STATIC_GATEWAY=${STATIC_GATEWAY:-}
+DHCP_ATTEMPT_SECONDS=${DHCP_ATTEMPT_SECONDS:-30}
+DHCP_RETRY_SECONDS=${DHCP_RETRY_SECONDS:-8}
+FALLBACK_SERVER=${FALLBACK_SERVER:-yes}
+FALLBACK_SECONDS=${FALLBACK_SECONDS:-60}
+FALLBACK_DNS=${FALLBACK_DNS:-1.1.1.1 8.8.8.8}
+CONFIG=${SUNNY_LAN_CONFIG:-/etc/sunny-lan.conf}
+[ -r "$CONFIG" ] && . "$CONFIG"
+BB=${SUNNY_LAN_BUSYBOX:-/usr/bin/busybox}
+RUN=${SUNNY_LAN_RUN:-/run/sunny-lan}
+RESOLV=${SUNNY_RESOLV_CONF:-/etc/resolv.conf}
+export SUNNY_LAN_RUN="$RUN" SUNNY_RESOLV_CONF="$RESOLV" SUNNY_FALLBACK_DNS="$FALLBACK_DNS"
+mkdir -p "$RUN" /var/lib/misc
+last_status_log=
+
+fallback_resolver() {
+  # A lease from an adapter that disappeared must not leave unreachable DNS
+  # servers behind.  Do not overwrite DNS while any interface has a gateway.
+  ip route show default 2>/dev/null | grep -q '^default ' && return 0
+  tmp="$RUN/resolv.fallback.$$"
+  : > "$tmp"
+  for server in $FALLBACK_DNS; do echo "nameserver $server" >> "$tmp"; done
+  echo 'options timeout:2 attempts:3' >> "$tmp"
+  chmod 0644 "$tmp"
+  mv "$tmp" "$RESOLV"
+}
+
+if ! mkdir "$RUN/lock" 2>/dev/null; then
+  old=$(cat "$RUN/owner" 2>/dev/null)
+  [ -n "$old" ] && kill -0 "$old" 2>/dev/null && exit 0
+  rm -rf "$RUN/lock"
+  mkdir "$RUN/lock" || exit 1
+fi
+echo $$ > "$RUN/owner"
+client= server= IF=
+cleanup() {
+  [ -z "$client" ] || kill "$client" 2>/dev/null
+  [ -z "$server" ] || kill "$server" 2>/dev/null
+  rm -rf "$RUN/lock" "$RUN/owner" "$RUN/udhcpc.pid" "$RUN/udhcpd.pid"
+}
+trap cleanup EXIT INT TERM HUP
+
+status() {
+  state=$1; detail=${2:-}
+  ip4=$(ip -4 -o addr show dev "$IF" 2>/dev/null | awk 'NR==1 {print $4}')
+  gateway=$(ip route show default dev "$IF" 2>/dev/null | awk 'NR==1 {print $3}')
+  dns=$(awk '/^nameserver / {printf "%s%s", sep, $2; sep=","}' "$RESOLV" 2>/dev/null)
+  carrier=$(cat "/sys/class/net/$IF/carrier" 2>/dev/null || echo 0)
+  tmp="$RUN/status.$$"
+  {
+    echo "STATE=$state"; echo "INTERFACE=$IF"; echo "CARRIER=$carrier"
+    echo "IP=${ip4:-none}"; echo "GATEWAY=${gateway:-none}"; echo "DNS=${dns:-none}"
+    echo "DETAIL=$detail"
+  } > "$tmp"
+  mv "$tmp" "$RUN/status"
+  signature="$state|$IF|$carrier|${ip4:-none}|${gateway:-none}|${dns:-none}|$detail"
+  if [ "$signature" != "$last_status_log" ]; then
+    printf '%s: if=%s carrier=%s ip=%s gateway=%s dns=%s %s\n' \
+      "$state" "$IF" "$carrier" "${ip4:-none}" "${gateway:-none}" "${dns:-none}" "$detail"
+    last_status_log=$signature
+  fi
+}
+
+cat > "$RUN/udhcpc-hook" <<'HOOK'
+#!/bin/sh
+case "$1" in
+  deconfig) ip addr flush dev "$interface" scope global 2>/dev/null || : ;;
+  bound|renew)
+    ip addr flush dev "$interface" scope global 2>/dev/null || :
+    prefix=${mask:-255.255.255.0}
+    case "$prefix" in
+      *.*) prefix=$(ipcalc -p "$ip" "$prefix" 2>/dev/null | sed -n 's/^PREFIX=//p');;
+    esac
+    [ -n "$prefix" ] || prefix=24
+    ip addr add "$ip/$prefix" dev "$interface"
+    ip link set "$interface" up
+    ip route del default dev "$interface" 2>/dev/null || :
+    if [ -n "$router" ]; then set -- $router; ip route add default via "$1" dev "$interface"; fi
+    servers=$dns
+    [ -n "$servers" ] || servers=${SUNNY_FALLBACK_DNS:-}
+    if [ -n "$servers" ]; then
+      run=${SUNNY_LAN_RUN:-/run/sunny-lan}
+      tmp="$run/resolv.conf.$$"; : > "$tmp"
+      for server in $servers; do echo "nameserver $server" >> "$tmp"; done
+      chmod 0644 "$tmp"
+      mv "$tmp" "$run/resolv.conf"
+      cp "$run/resolv.conf" "${SUNNY_RESOLV_CONF:-/etc/resolv.conf}"
+      chmod 0644 "${SUNNY_RESOLV_CONF:-/etc/resolv.conf}"
+    fi
+    /usr/local/sbin/sunny-time-sync --once >/dev/null 2>&1 &
+    ;;
+esac
+HOOK
+chmod 755 "$RUN/udhcpc-hook"
+
+find_interface() {
+  for p in /sys/class/net/*; do
+    n=${p##*/}
+    case "$n" in lo|rndis*|wlan*) continue;; eth*|en*|usb*) IF=$n; return 0;; esac
+  done
+  return 1
+}
+
+fallback_resolver
+while ! find_interface; do IF=none; status 'Network Disconnected' 'waiting for OTG Ethernet interface'; IF=; sleep 3; done
+ip link set "$IF" up
+
+if [ "$MODE" = static ]; then
+  ip addr replace "$STATIC_ADDRESS" dev "$IF"
+  [ -z "$STATIC_GATEWAY" ] || ip route replace default via "$STATIC_GATEWAY" dev "$IF"
+  status 'Network Connected' 'static configuration'
+  while :; do sleep 30; done
+fi
+
+start_client() {
+  [ -z "$server" ] || { kill "$server" 2>/dev/null; wait "$server" 2>/dev/null; server=; }
+  ip addr flush dev "$IF" scope global 2>/dev/null || :
+  rm -f "$RUN/udhcpc.pid"
+  $BB udhcpc -i "$IF" -p "$RUN/udhcpc.pid" -s "$RUN/udhcpc-hook" -f -t 0 -T 4 -A 3 &
+  client=$!
+}
+
+start_server() {
+  [ -z "$client" ] || { kill "$client" 2>/dev/null; wait "$client" 2>/dev/null; client=; }
+  ip addr flush dev "$IF" scope global 2>/dev/null || :
+  ip addr add "$STATIC_ADDRESS" dev "$IF"
+  cat > "$RUN/udhcpd.conf" <<EOF
+start 192.168.50.100
+end 192.168.50.200
+interface $IF
+lease_file /var/lib/misc/udhcpd.leases
+pidfile $RUN/udhcpd.pid
+option subnet 255.255.255.0
+option lease 3600
+EOF
+  touch /var/lib/misc/udhcpd.leases
+  $BB udhcpd -f "$RUN/udhcpd.conf" & server=$!
+}
+
+phase=dhcp elapsed=0
+while :; do
+  if [ ! -d "/sys/class/net/$IF" ]; then
+    [ -z "$client" ] || { kill "$client" 2>/dev/null; wait "$client" 2>/dev/null; client=; }
+    [ -z "$server" ] || { kill "$server" 2>/dev/null; wait "$server" 2>/dev/null; server=; }
+    old=$IF; IF=none; status 'Network Disconnected' "interface $old was removed"; IF=
+    fallback_resolver
+    while ! find_interface; do IF=none; status 'Network Disconnected' 'waiting for OTG Ethernet interface'; IF=; sleep 3; done
+    ip link set "$IF" up; phase=dhcp; elapsed=0
+  fi
+  carrier=$(cat "/sys/class/net/$IF/carrier" 2>/dev/null || echo 0)
+  if [ "$carrier" != 1 ]; then
+    [ -z "$client" ] || { kill "$client" 2>/dev/null; wait "$client" 2>/dev/null; client=; }
+    [ -z "$server" ] || { kill "$server" 2>/dev/null; wait "$server" 2>/dev/null; server=; }
+    ip addr flush dev "$IF" scope global 2>/dev/null || :
+    fallback_resolver
+    status 'Network Disconnected' 'OTG link has no carrier'
+    while [ -d "/sys/class/net/$IF" ] && [ "$(cat "/sys/class/net/$IF/carrier" 2>/dev/null)" != 1 ]; do sleep 3; done
+    [ -d "/sys/class/net/$IF" ] || continue
+    phase=dhcp; elapsed=0
+  fi
+
+  if [ "$phase" = dhcp ]; then
+    if [ -z "$client" ] || ! kill -0 "$client" 2>/dev/null; then
+      status 'Requesting IP' 'starting DHCP client'
+      start_client; elapsed=0
+    fi
+    ip4=$(ip -4 -o addr show dev "$IF" scope global 2>/dev/null | awk 'NR==1 {print $4}')
+    if [ -n "$ip4" ]; then
+      status 'IP Assigned' 'validating gateway and DNS'
+      if ip route show default dev "$IF" | grep -q '^default ' || [ "$MODE" = dhcp ]; then
+        status 'Network Connected' 'DHCP lease active'
+      else status 'IP Assigned' 'no default gateway supplied'; fi
+      elapsed=0
+      while [ "$(cat "/sys/class/net/$IF/carrier" 2>/dev/null)" = 1 ] && \
+            ip -4 -o addr show dev "$IF" scope global 2>/dev/null | grep -q 'inet '; do
+        kill -0 "$client" 2>/dev/null || break
+        sleep 5
+      done
+      status 'DHCP Retry' 'lease, client, or carrier was lost'
+      [ -z "$client" ] || { kill "$client" 2>/dev/null; wait "$client" 2>/dev/null; client=; }
+      sleep "$DHCP_RETRY_SECONDS"
+      continue
+    fi
+    status 'Waiting for DHCP' "attempt ${elapsed}s/${DHCP_ATTEMPT_SECONDS}s"
+    sleep 2; elapsed=$((elapsed+2))
+    if [ "$MODE" = auto ] && [ "$FALLBACK_SERVER" = yes ] && [ "$elapsed" -ge "$DHCP_ATTEMPT_SECONDS" ]; then
+      phase=fallback; elapsed=0
+      status 'DHCP Retry' 'no offer; temporary fallback server'
+      start_server
+    fi
+  else
+    status 'Network Connected' "fallback DHCP server; upstream retry in $((FALLBACK_SECONDS-elapsed))s"
+    sleep 5; elapsed=$((elapsed+5))
+    if [ "$elapsed" -ge "$FALLBACK_SECONDS" ]; then
+      status 'DHCP Retry' 'probing again for an upstream DHCP server'
+      [ -z "$server" ] || { kill "$server" 2>/dev/null; wait "$server" 2>/dev/null; server=; }
+      phase=dhcp; elapsed=0
+      sleep "$DHCP_RETRY_SECONDS"
+    fi
+  fi
+done

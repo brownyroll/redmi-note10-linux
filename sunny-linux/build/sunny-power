@@ -1,0 +1,23 @@
+#!/bin/sh
+# Immediate power actions for the custom init on the vendor kernel.
+cmd=${0##*/}
+case "$cmd" in reboot) action=reboot;; *) action=poweroff;; esac
+for arg in "$@"; do
+  case "$arg" in
+    -r|--reboot) action=reboot ;;
+    -h|-P|--poweroff|--halt|now|-f|--force) ;;
+    *) echo "Only immediate power actions are supported: $cmd [now|-h|-r]" >&2; exit 2 ;;
+  esac
+done
+echo "Brownyrollz-PhoneSunny: syncing filesystems before $action"
+if [ "$(date -u +%Y 2>/dev/null || echo 1970)" -ge 2024 ]; then
+  mkdir -p /var/lib/sunny
+  date -u +%s > /var/lib/sunny/last-good-epoch
+  chmod 0600 /var/lib/sunny/last-good-epoch
+fi
+if [ "$action" = poweroff ]; then
+  mkdir -p /var/lib/sunny
+  printf 'poweroff\n' > /var/lib/sunny/shutdown-for-charge
+fi
+sync
+exec /usr/bin/busybox "$action" -f

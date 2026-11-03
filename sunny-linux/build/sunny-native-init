@@ -1,0 +1,88 @@
+#!/bin/sh
+# Temporary init for the vendor 4.14 kernel; systemd 259 needs a newer kernel.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/root TERM=linux
+# switch_root on this vendor kernel can lose the initramfs devtmpfs mount.
+# Mount it again and enforce the standard character-device major/minor values.
+grep -q ' /dev ' /proc/mounts 2>/dev/null || mount -t devtmpfs devtmpfs /dev
+ensure_dev() {
+  path=$1 major=$2 minor=$3
+  if [ ! -c "$path" ]; then rm -f "$path"; mknod "$path" c "$major" "$minor"; fi
+  chmod 0666 "$path"
+}
+ensure_dev /dev/null 1 3
+ensure_dev /dev/zero 1 5
+ensure_dev /dev/full 1 7
+ensure_dev /dev/random 1 8
+ensure_dev /dev/urandom 1 9
+ensure_dev /dev/tty 5 0
+ensure_dev /dev/ptmx 5 2
+mkdir -p /var/log
+exec >>/var/log/sunny-native-boot.log 2>&1
+echo "===== sunny native boot ====="
+set -x
+mkdir -p /run /run/sshd /dev/pts /dev/shm /configfs /tmp
+mountpoint -q /dev/pts || mount -t devpts devpts /dev/pts
+mount -t tmpfs tmpfs /run
+mkdir -p /run/sshd
+charge_only=no
+if [ -f /var/lib/sunny/shutdown-for-charge ]; then
+  if /usr/bin/busybox dmesg | grep -q 'Power-on reason: Triggered from USB'; then
+    charge_only=yes
+    : > /run/sunny-charge-mode
+    echo 'USB insertion after shutdown: charging-only mode'
+  fi
+  rm -f /var/lib/sunny/shutdown-for-charge
+  sync
+fi
+hostname Brownyrollz-PhoneSunny
+printf '%s\n' Brownyrollz-PhoneSunny > /etc/hostname
+/usr/local/sbin/sunny-base-tools
+/usr/local/sbin/sunny-base-config
+/usr/local/sbin/sunny-time-sync --restore
+/usr/local/sbin/sunny-battery >>/var/log/sunny-battery.log 2>&1 &
+/usr/local/sbin/sunny-qgd >>/var/log/sunny-qgd.log 2>&1 &
+mount -t configfs configfs /configfs
+G=/configfs/usb_gadget/g1
+mkdir -p "$G/strings/0x409" "$G/configs/c.1/strings/0x409" "$G/functions/rndis.usb0" "$G/functions/acm.GS0"
+echo 0x1d6b > "$G/idVendor"; echo 0x0104 > "$G/idProduct"
+echo sunny > "$G/strings/0x409/serialnumber"; echo Brownyrollz > "$G/strings/0x409/manufacturer"; echo Brownyrollz-PhoneSunny > "$G/strings/0x409/product"
+echo usb > "$G/configs/c.1/strings/0x409/configuration"
+ln -s "$G/functions/rndis.usb0" "$G/configs/c.1/" 2>/dev/null
+ln -s "$G/functions/acm.GS0" "$G/configs/c.1/" 2>/dev/null
+for attempt in $(seq 1 30); do UDC=$(ls /sys/class/udc | head -1); [ -n "$UDC" ] && break; sleep 1; done
+[ -n "$UDC" ] && echo "$UDC" > "$G/UDC"
+# The vendor kernel does not populate all late device nodes by itself.
+/usr/bin/busybox mdev -s
+chmod 0666 /dev/null /dev/zero /dev/full /dev/random /dev/urandom /dev/tty /dev/ptmx 2>/dev/null || :
+(while :; do
+  /usr/bin/busybox mdev -s
+  chmod 0666 /dev/null /dev/zero /dev/full /dev/random /dev/urandom /dev/tty /dev/ptmx 2>/dev/null || :
+  sleep 10
+done) &
+# Open the recovery channel before waiting for networking or the display.
+(while :; do
+  [ -c /dev/ttyGS0 ] && setsid /bin/sh -c 'exec /bin/sh -i </dev/ttyGS0 >/dev/ttyGS0 2>&1'
+  sleep 3
+done) &
+for attempt in $(seq 1 30); do [ -e /sys/class/net/rndis0 ] && break; sleep 1; done
+ip link set rndis0 up 2>/dev/null
+ip addr replace 192.168.42.2/24 dev rndis0 2>/dev/null
+mkdir -p /run/sshd
+(while :; do
+  setsid -w /usr/local/sbin/sunnyterm >>/var/log/sunny-display.log 2>&1 </dev/null
+  sleep 5
+done) &
+if [ "$charge_only" != yes ]; then
+  /usr/local/sbin/sunny-time-sync >>/var/log/sunny-time-sync.log 2>&1 &
+  /usr/local/sbin/sunny-service boot start
+  /usr/local/sbin/sunny-usb-role >>/var/log/sunny-usb-role.log 2>&1 &
+  /usr/local/sbin/sunny-lan >>/var/log/sunny-lan.log 2>&1 &
+else
+  # Stay alive on battery after cable removal. The power-supply driver and UI
+  # detect reconnect without rebooting; long Power still starts full Linux.
+  echo 'charging-only UI remains alive across USB disconnect/reconnect'
+fi
+for w in /dev/watchdog /dev/watchdog0; do
+  if [ -c "$w" ]; then (while :; do printf 1 > "$w"; sleep 5; done) & break; fi
+done
+while :; do sleep 30; done

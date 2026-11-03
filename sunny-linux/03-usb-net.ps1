@@ -22,7 +22,7 @@ Write-Host "=== รอ adapter USB (RNDIS) สูงสุด $Timeout วิ ==
 while ($sw.Elapsed.TotalSeconds -lt $Timeout) {
     # Apple Mobile / Пctd ฯลฯ ไม่เกี่ยว — หา adapter ที่เป็น USB และห้าม Duplicate
     $a = Get-NetAdapter -ErrorAction SilentlyContinue |
-         Where-Object { $_.InterfaceDescription -match 'RemoteNDIS|RNDIS|USB Ethernet|USB Ethernet/RNDIS' }
+         Where-Object { $_.InterfaceDescription -match 'Remote\s*NDIS|RNDIS|USB Ethernet|USB Ethernet/RNDIS' }
     if ($a) { $adapter = $a | Select-Object -First 1; break }
     Start-Sleep -Seconds 2
 }
@@ -49,7 +49,8 @@ if ($adapter.Status -ne 'Up') {
     Enable-NetAdapter $adapter.Name -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
     Start-Sleep -Seconds 3
 } else {
-    $ip = (Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -ErrorAction SilentlyContinue | Select-Object -First 1).IPAddress
+    $ip = (Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+           Where-Object { $_.IPAddress -notlike '169.254.*' } | Select-Object -First 1).IPAddress
     Write-Host "IP ปัจจุบัน: $ip" -ForegroundColor Gray
     if ($ip -ne $HostIP) {
         New-NetIPAddress -InterfaceIndex $adapter.ifIndex -IPAddress $HostIP -PrefixLength 24 -ErrorAction SilentlyContinue | Out-Null

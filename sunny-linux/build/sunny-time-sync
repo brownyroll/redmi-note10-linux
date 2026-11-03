@@ -1,0 +1,41 @@
+#!/bin/sh
+# Minimal clock discipline for custom init (systemd-timesyncd cannot run here).
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+STATE=/var/lib/sunny/last-good-epoch
+mkdir -p /var/lib/sunny
+
+valid_clock() { [ "$(date -u +%Y 2>/dev/null || echo 1970)" -ge 2024 ]; }
+save_clock() {
+  valid_clock || return 1
+  tmp="$STATE.$$"; date -u +%s > "$tmp" && chmod 0600 "$tmp" && mv "$tmp" "$STATE"
+}
+restore_clock() {
+  valid_clock && return 0
+  [ -r "$STATE" ] || return 1
+  epoch=$(cat "$STATE")
+  case "$epoch" in *[!0-9]*|'') return 1;; esac
+  date -u -s "@$epoch" >/dev/null 2>&1
+}
+sync_http_date() {
+  ip route show default 2>/dev/null | grep -q '^default ' || return 1
+  command -v curl >/dev/null 2>&1 || return 1
+  codename=$(sed -n 's/^VERSION_CODENAME=//p' /etc/os-release | tr -d '"')
+  [ -n "$codename" ] || return 1
+  stamp=$(curl -fsSI --max-time 12 -H 'Cache-Control: no-cache' \
+    "http://ports.ubuntu.com/ubuntu-ports/dists/$codename/InRelease" 2>/dev/null |
+    sed -n 's/^[Dd]ate:[[:space:]]*//p' | tr -d '\r' | tail -n 1)
+  [ -n "$stamp" ] || return 1
+  date -u -s "$stamp" >/dev/null 2>&1 || return 1
+  save_clock
+}
+
+case "${1:-daemon}" in
+  --restore) restore_clock || :; exit 0;;
+  --once) restore_clock || :; sync_http_date;;
+esac
+restore_clock || :
+while :; do
+  sync_http_date && break
+  sleep 5
+done
+while :; do save_clock || :; sleep 60; done

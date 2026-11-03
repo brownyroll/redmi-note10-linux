@@ -1,0 +1,25 @@
+#!/bin/sh
+set -u
+ROOT=/sys/fs/cgroup
+mkdir -p "$ROOT"
+grep -q " $ROOT " /proc/mounts || mount -t tmpfs -o mode=755 cgroup_root "$ROOT"
+while read name hierarchy count enabled; do
+  case "$name" in \#*|'') continue;; esac
+  [ "$enabled" = 1 ] || continue
+  # cpu and cpuacct must share one hierarchy on this vendor kernel.
+  [ "$name" = cpuacct ] && continue
+  spec=$name
+  [ "$name" = cpu ] && spec=cpu,cpuacct
+  dir="$ROOT/$spec"
+  mkdir -p "$dir"
+  grep -q " $dir " /proc/mounts || mount -t cgroup -o "$spec" cgroup "$dir" 2>/dev/null || :
+done < /proc/cgroups
+
+missing=
+for c in devices pids memory; do
+  awk -v c="$c" '$1==c && $4==1 {ok=1} END{exit !ok}' /proc/cgroups || missing="$missing $c"
+done
+if [ -n "$missing" ]; then
+  echo "UNSUPPORTED: running kernel lacks required cgroup controllers:$missing" >&2
+  exit 2
+fi

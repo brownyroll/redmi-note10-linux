@@ -1,0 +1,30 @@
+#!/bin/sh
+# Print only changes; values come from the USB role and battery drivers.
+last=
+while :; do
+  role=$(cat /sys/class/dual_role_usb/otg_default/data_role 2>/dev/null)
+  power=$(cat /sys/class/dual_role_usb/otg_default/power_role 2>/dev/null)
+  typec=$(cat /sys/class/power_supply/usb/typec_mode 2>/dev/null)
+  battery=$(cat /sys/class/power_supply/battery/status 2>/dev/null)
+  case "$role" in
+    host) mode='OTG host' ;;
+    device) mode='PC/device' ;;
+    none|'') mode='disconnected or undetected' ;;
+    *) mode="$role" ;;
+  esac
+  lan=
+  for p in /sys/class/net/*; do
+    n=${p##*/}
+    case "$n" in eth*|enx*|enp*|ens*)
+      addr=$(ip -4 -o addr show dev "$n" 2>/dev/null | awk '{print $4}' | head -1)
+      lan="; LAN $n ${addr:-no-IP}"; break ;;
+    esac
+  done
+  line="USB: $mode; power role: ${power:-unknown}; battery: ${battery:-unknown}; Type-C: ${typec:-unknown}${lan}"
+  if [ "$line" != "$last" ]; then
+    printf '\n%s\n' "$line"
+    printf '%s %s\n' "$(date '+%F %T')" "$line" >> /var/log/sunny-usb-status.log
+    last=$line
+  fi
+  sleep 3
+done

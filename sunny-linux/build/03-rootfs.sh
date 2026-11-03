@@ -64,7 +64,7 @@ systemctl enable serial-getty@ttyGS0.service 2>/dev/null || true
 
 # ssh: อนุญาต password + root no
 mkdir -p /etc/ssh/sshd_config.d
-printf 'PasswordAuthentication yes\nPermitRootLogin no\n' > /etc/ssh/sshd_config.d/99-sunny.conf
+printf 'PasswordAuthentication yes\nPermitRootLogin yes\nPermitEmptyPasswords no\nAllowUsers root dev\n' > /etc/ssh/sshd_config.d/99-sunny.conf
 ssh-keygen -A
 systemctl enable ssh
 

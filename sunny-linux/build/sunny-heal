@@ -1,0 +1,73 @@
+#!/bin/sh
+# Small recovery actions used by the physical-button HEAL SYSTEM menu.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+action=${1:-status}
+case "$action" in
+  status)
+    echo '=== SYSTEM STATUS ==='
+    uptime
+    free -h 2>/dev/null || free
+    df -h /
+    echo '--- USB role ---'; cat /run/sunny-usb-role/status 2>/dev/null || echo unavailable
+    echo '--- OTG network ---'; cat /run/sunny-lan/status 2>/dev/null || echo unavailable
+    ;;
+  network)
+    echo 'HEAL: restarting the single OTG/DHCP state machine'
+    pid=$(cat /run/sunny-lan/owner 2>/dev/null || :)
+    [ -z "$pid" ] || kill "$pid" 2>/dev/null || :
+    for _ in 1 2 3 4 5; do [ ! -d /run/sunny-lan/lock ] && break; sleep 1; done
+    rm -rf /run/sunny-lan/lock /run/sunny-lan/owner
+    setsid /usr/local/sbin/sunny-lan >>/var/log/sunny-lan.log 2>&1 </dev/null &
+    echo "HEAL: network manager restarted as PID $!"
+    ;;
+  usb)
+    echo 'HEAL: rescanning USB and input devices'
+    /usr/bin/busybox mdev -s
+    for d in /sys/bus/usb/devices/*; do
+      [ -r "$d/product" ] && printf '%s: ' "${d##*/}" && cat "$d/product"
+    done
+    ;;
+  battery)
+    echo '=== BATTERY / CHARGER ==='
+    for f in status capacity health voltage_now current_now temp technology charge_counter charge_full charge_full_design cycle_count; do
+      p="/sys/class/power_supply/battery/$f"; [ -r "$p" ] && printf '%-20s ' "$f" && cat "$p"
+    done
+    for f in present online real_type type voltage_now voltage_max current_max; do
+      p="/sys/class/power_supply/usb/$f"; [ -r "$p" ] && printf 'usb/%-16s ' "$f" && cat "$p"
+    done
+    temp=$(cat /sys/class/power_supply/battery/temp 2>/dev/null || echo 0)
+    health=$(cat /sys/class/power_supply/battery/health 2>/dev/null || echo unknown)
+    [ "$temp" -lt 450 ] && [ "$health" = Good ] && echo 'CHECK: battery temperature/health OK' || echo 'WARNING: inspect battery health or temperature'
+    ;;
+  thermal)
+    echo '=== THERMAL SENSORS ==='
+    for z in /sys/class/thermal/thermal_zone*; do
+      [ -r "$z/type" ] && [ -r "$z/temp" ] || continue
+      t=$(cat "$z/temp"); [ "$t" -gt 1000 ] || continue
+      printf '%-24s %s.%s C\n' "$(cat "$z/type")" "$((t/1000))" "$(((t%1000)/100))"
+    done
+    ;;
+  storage)
+    echo '=== STORAGE / FILESYSTEM ==='; df -h; echo '--- mounts ---'; mount
+    echo '--- recent filesystem messages ---'
+    /usr/bin/busybox dmesg | grep -Ei 'ext4|ufs|I/O error|filesystem' | tail -n 30
+    ;;
+  process)
+    echo '=== PROCESS / LOAD ==='; uptime; free -h 2>/dev/null || free
+    ps aux --sort=-%cpu 2>/dev/null | head -n 12 || ps
+    ;;
+  report)
+    out=/var/log/sunny-health-report.txt
+    {
+      date; "$0" status; "$0" battery; "$0" thermal
+      "$0" storage; "$0" process
+    } > "$out" 2>&1
+    echo "Diagnostic report saved to $out"
+    ;;
+  sync)
+    echo 'HEAL: syncing filesystems'
+    sync
+    echo 'HEAL: filesystem buffers are synced'
+    ;;
+  *) echo "usage: sunny-heal {status|network|usb|battery|thermal|storage|process|report|sync}" >&2; exit 2;;
+esac

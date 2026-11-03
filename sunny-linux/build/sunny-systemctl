@@ -1,0 +1,41 @@
+#!/bin/sh
+# Honest compatibility adapter for the PhoneSunny native service manager.
+# It never claims that systemd is running and never returns success for an
+# unsupported unit/action.  If genuine systemd becomes PID 1, defer to it.
+set -u
+if [ "$(cat /proc/1/comm 2>/dev/null)" = systemd ]; then
+  exec /usr/bin/systemctl "$@"
+fi
+
+action=${1:-status}
+unit=${2:-}
+unit=${unit%.service}
+[ "$unit" = sshd ] && unit=ssh
+
+header() {
+  echo 'PhoneSunny native service manager (PID 1: sunny-native-init; systemd unavailable)'
+}
+case "$action:$unit" in
+  status:)
+    header
+    exec /usr/local/sbin/sunny-service all status;;
+  status:ssh|status:docker)
+    header
+    exec /usr/local/sbin/sunny-service "$unit" status;;
+  start:ssh|start:docker|stop:ssh|stop:docker|restart:ssh|restart:docker)
+    header
+    exec /usr/local/sbin/sunny-service "$unit" "$action";;
+  enable:ssh|enable:docker|disable:ssh|disable:docker)
+    header
+    exec /usr/local/sbin/sunny-service "$unit" "$action";;
+  is-active:ssh|is-active:docker)
+    if /usr/local/sbin/sunny-service "$unit" is-active; then echo active; exit 0; else echo inactive; exit 3; fi;;
+  is-enabled:ssh|is-enabled:docker)
+    if /usr/local/sbin/sunny-service "$unit" is-enabled; then echo enabled; exit 0; else echo disabled; exit 1; fi;;
+  *)
+    header >&2
+    echo "unsupported without genuine systemd: systemctl $*" >&2
+    echo 'supported units: ssh.service (or sshd.service), docker.service' >&2
+    echo 'native commands: sunnyctl ssh|docker {start|stop|restart|status}' >&2
+    exit 1;;
+esac

@@ -1,0 +1,19 @@
+diff --git a/drivers/power/supply/qcom/qpnp-qg.c b/drivers/power/supply/qcom/qpnp-qg.c
+--- a/drivers/power/supply/qcom/qpnp-qg.c
++++ b/drivers/power/supply/qcom/qpnp-qg.c
+@@ -3505,6 +3505,15 @@ static int qg_load_battery_profile(struct qpnp_qg *chip)
+ 		pr_err("Failed to detect valid QG battery profile %d\n", rc);
+ 		return rc;
+ 	}
++#ifdef CONFIG_BATT_VERIFY_BY_DS28E16
++	/*
++	 * A readable DS28E16 can still return an erased or unrecognised page 0.
++	 * The code above deliberately falls back to the Sunwoda profile in that
++	 * case, but historically forgot to complete profile selection.  QG then
++	 * remained at its shutdown SOC forever (commonly 2 percent on sunny).
++	 */
++	chip->profile_judge_done = true;
++#endif
+ 
+ 	rc = of_property_read_string(profile_node, "qcom,battery-type",
+ 				&chip->bp.batt_type_str);

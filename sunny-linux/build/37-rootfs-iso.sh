@@ -90,7 +90,7 @@ systemctl enable systemd-networkd.service
 
 # ssh
 mkdir -p /etc/ssh/sshd_config.d
-printf 'PasswordAuthentication yes\nPermitRootLogin no\n' > /etc/ssh/sshd_config.d/99-sunny.conf
+printf 'PasswordAuthentication yes\nPermitRootLogin yes\nPermitEmptyPasswords no\nAllowUsers root dev\n' > /etc/ssh/sshd_config.d/99-sunny.conf
 ssh-keygen -A
 systemctl enable ssh.service 2>/dev/null || systemctl enable sshd.service 2>/dev/null || true
 
