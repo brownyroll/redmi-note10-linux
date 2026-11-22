@@ -1,0 +1,14 @@
+[Unit]
+Description=Hold Qualcomm modem subsystem online
+After=rmtfs.service qrtr-ns.service
+Before=ModemManager.service
+Wants=rmtfs.service qrtr-ns.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -c "import os,time; fd=os.open('/dev/subsys_modem', os.O_RDWR | os.O_NONBLOCK); time.sleep(86400)"
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

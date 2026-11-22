@@ -1,0 +1,15 @@
+#!/bin/sh
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+mkdir -p /run /tmp /dev/pts /dev/shm /var/log
+mountpoint -q /run || mount -t tmpfs tmpfs /run
+: > /run/systemd-boot-pending
+setsid /bin/sh -c '
+  sleep 180
+  if [ ! -e /run/systemd-boot-ok ]; then
+    chattr -i /usr/local/sbin/sunny-native-init 2>/dev/null || true
+    cp /usr/local/sbin/sunny-native-init.sunny-backup /usr/local/sbin/sunny-native-init 2>/dev/null || true
+    sync
+    reboot -f 2>/dev/null || echo b > /proc/sysrq-trigger 2>/dev/null || true
+  fi
+' </dev/null >/var/log/systemd-rollback.log 2>&1 &
+exec /lib/systemd/systemd

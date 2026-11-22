@@ -1,0 +1,12 @@
+[Unit]
+Description=Mark pure systemd boot as successful
+After=basic.target
+ConditionPathExists=/run/systemd-boot-pending
+
+[Service]
+Type=oneshot
+ExecStart=/bin/touch /run/systemd-boot-ok
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
